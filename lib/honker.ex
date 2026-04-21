@@ -91,6 +91,94 @@ defmodule Honker do
     end
   end
 
+  @doc """
+  Fire a notification inside an open transaction. The notification row
+  only becomes visible to listeners after the transaction commits.
+  """
+  def notify_tx(%Honker.Transaction{conn: conn}, channel, payload) do
+    json = Jason.encode!(payload)
+
+    case query_first(conn, "SELECT notify(?1, ?2)", [channel, json]) do
+      {:ok, [id]} -> {:ok, id}
+      other -> other
+    end
+  end
+
+  @doc """
+  Fixed-window rate limit. Returns `{:ok, true}` if the caller fits in
+  `limit` per `per` seconds, `{:ok, false}` if blocked.
+  """
+  def try_rate_limit(%Database{conn: conn}, name, limit, per) do
+    case query_first(conn, "SELECT honker_rate_limit_try(?1, ?2, ?3)", [name, limit, per]) do
+      {:ok, [1]} -> {:ok, true}
+      {:ok, [0]} -> {:ok, false}
+      {:ok, nil} -> {:ok, false}
+      other -> other
+    end
+  end
+
+  @doc """
+  Persist a job result for later retrieval via `get_result/2`. `value`
+  must be a string — encode JSON yourself if you want structure. `ttl_s`
+  is seconds before `sweep_results/1` will delete it.
+  """
+  def save_result(%Database{conn: conn}, job_id, value, ttl_s) when is_binary(value) do
+    case query_first(conn, "SELECT honker_result_save(?1, ?2, ?3)", [job_id, value, ttl_s]) do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
+  @doc """
+  Fetch a stored result. Returns `{:ok, value}` or `{:ok, nil}` when
+  absent or expired.
+  """
+  def get_result(%Database{conn: conn}, job_id) do
+    case query_first(conn, "SELECT honker_result_get(?1)", [job_id]) do
+      {:ok, [value]} -> {:ok, value}
+      {:ok, nil} -> {:ok, nil}
+      other -> other
+    end
+  end
+
+  @doc "Delete expired results. Returns `{:ok, count_deleted}`."
+  def sweep_results(%Database{conn: conn}) do
+    case query_first(conn, "SELECT honker_result_sweep()", []) do
+      {:ok, [count]} -> {:ok, count || 0}
+      other -> other
+    end
+  end
+
+  @doc """
+  Delete notifications older than `older_than_s` seconds. Returns
+  `{:ok, count_deleted}`.
+  """
+  def prune_notifications(%Database{conn: conn}, older_than_s) do
+    sql = """
+    DELETE FROM _honker_notifications
+    WHERE created_at < unixepoch() - ?1
+    """
+
+    with {:ok, stmt} <- Sqlite3.prepare(conn, sql),
+         :ok <- Sqlite3.bind(stmt, [older_than_s]),
+         step <- Sqlite3.step(conn, stmt),
+         :ok <- Sqlite3.release(conn, stmt) do
+      case step do
+        :done -> {:ok, changes_count(conn)}
+        {:row, _} -> {:ok, changes_count(conn)}
+        err -> err
+      end
+    end
+  end
+
+  defp changes_count(conn) do
+    case Sqlite3.changes(conn) do
+      {:ok, n} -> n
+      n when is_integer(n) -> n
+      _ -> 0
+    end
+  end
+
   @doc false
   def queue_opts(%Database{queue_opts: opts}, queue_name) do
     Map.get(opts, queue_name, {300, 3})

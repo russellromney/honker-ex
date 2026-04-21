@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        otp: ["26"]
+        elixir: ["1.15", "1.16"]
+    steps:
+      - name: Checkout main honker
+        uses: actions/checkout@v4
+        with:
+          repository: russellromney/honker
+          path: main
+
+      - name: Prep submodule path
+        run: rm -rf main/packages/honker-ex
+      - name: Checkout honker-ex PR
+        uses: actions/checkout@v4
+        with:
+          path: main/packages/honker-ex
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: main
+
+      - name: Build honker extension
+        working-directory: main
+        run: cargo build --release -p honker-extension
+
+      - name: Set up Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      - name: Install deps
+        working-directory: main/packages/honker-ex
+        run: mix deps.get
+
+      - name: Run tests
+        working-directory: main/packages/honker-ex
+        run: mix test

@@ -70,7 +70,7 @@ Fire a `pg_notify`-style pub/sub signal.
 
 - `GenServer`-backed worker / Supervisor tree (you can build this in ~50 lines with the claim + ack primitives)
 - Typed Streams / Scheduler wrappers (use raw SQL on `db.conn` for now)
-- `listen` / WAL-wake async API
+- `listen` / update-wake async API
 
 The design intent: keep the binding *tiny*, let the Elixir / Phoenix side build whatever Supervisor/GenServer shape fits the app.
 

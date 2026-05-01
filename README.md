@@ -69,10 +69,21 @@ Fire a `pg_notify`-style pub/sub signal.
 ## What's not here yet
 
 - `GenServer`-backed worker / Supervisor tree (you can build this in ~50 lines with the claim + ack primitives)
-- Typed Streams / Scheduler wrappers (use raw SQL on `db.conn` for now)
 - `listen` / update-wake async API
 
 The design intent: keep the binding *tiny*, let the Elixir / Phoenix side build whatever Supervisor/GenServer shape fits the app.
+
+### `Honker.Scheduler`
+
+Recurring time-trigger wrapper over `honker_scheduler_*`.
+
+Use `schedule:` as the canonical recurring expression key:
+
+- 5-field cron
+- 6-field cron
+- `@every <n><unit>`
+
+`cron:` still works as a backward-compatible alias.
 
 ## Testing
 

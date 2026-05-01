@@ -1,13 +1,13 @@
 defmodule Honker.Scheduler do
   @moduledoc """
-  Cron-scheduled task registry. Thin wrapper over `honker_scheduler_*`
+  Time-trigger task registry. Thin wrapper over `honker_scheduler_*`
   SQL functions, plus a blocking `run/3` loop with leader election via
   the `honker-scheduler` advisory lock.
 
       :ok = Honker.Scheduler.add(db,
         name: "hourly-health",
         queue: "health",
-        cron: "0 * * * *",
+        schedule: "0 * * * *",
         payload: %{}
       )
 
@@ -27,13 +27,15 @@ defmodule Honker.Scheduler do
   @standby_poll_ms 5_000
 
   @doc """
-  Register a cron task. Idempotent by `:name`.
+  Register a recurring scheduled task. Idempotent by `:name`.
 
   Options (all required except `:priority` and `:expires_s`):
 
     * `:name`       — unique task name
     * `:queue`      — queue the payload is enqueued onto each fire
-    * `:cron`       — standard 5-field cron expression
+    * `:schedule`   — canonical schedule expression:
+                      5-field cron, 6-field cron, or `@every <n><unit>`
+    * `:cron`       — backward-compatible alias for `:schedule`
     * `:payload`    — any JSON-encodable term
     * `:priority`   — integer (default 0)
     * `:expires_s`  — seconds; the fired job expires this many seconds
@@ -42,7 +44,8 @@ defmodule Honker.Scheduler do
   def add(%Database{conn: conn}, opts) do
     name = Keyword.fetch!(opts, :name)
     queue = Keyword.fetch!(opts, :queue)
-    cron = Keyword.fetch!(opts, :cron)
+    schedule = Keyword.get(opts, :schedule) || Keyword.get(opts, :cron)
+    if is_nil(schedule), do: raise(ArgumentError, "missing required option :schedule")
     payload = Keyword.fetch!(opts, :payload)
     priority = Keyword.get(opts, :priority, 0)
     expires_s = Keyword.get(opts, :expires_s)
@@ -52,7 +55,7 @@ defmodule Honker.Scheduler do
     case Honker.query_first(
            conn,
            "SELECT honker_scheduler_register(?1, ?2, ?3, ?4, ?5, ?6)",
-           [name, queue, cron, payload_json, priority, expires_s]
+           [name, queue, schedule, payload_json, priority, expires_s]
          ) do
       {:ok, [_]} -> :ok
       {:ok, nil} -> :ok

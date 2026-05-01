@@ -190,7 +190,7 @@ defmodule HonkerParityTest do
       Scheduler.add(db,
         name: "hourly",
         queue: "health",
-        cron: "0 * * * *",
+        schedule: "0 * * * *",
         payload: %{}
       )
 
@@ -210,7 +210,7 @@ defmodule HonkerParityTest do
       Scheduler.add(db,
         name: "every-minute",
         queue: "h",
-        cron: "* * * * *",
+        schedule: "* * * * *",
         payload: %{}
       )
 
@@ -259,6 +259,34 @@ defmodule HonkerParityTest do
 
     [n] = row
     assert n == 0
+  end
+
+  test "Scheduler accepts legacy cron alias", %{db: db} do
+    :ok =
+      Scheduler.add(db,
+        name: "legacy",
+        queue: "health",
+        cron: "@every 1s",
+        payload: %{}
+      )
+
+    {:ok, soonest} = Scheduler.soonest(db)
+    assert soonest > 0
+    {:ok, 1} = Scheduler.remove(db, "legacy")
+  end
+
+  test "Scheduler accepts every-second schedule", %{db: db} do
+    :ok =
+      Scheduler.add(db,
+        name: "fast",
+        queue: "health",
+        schedule: "@every 1s",
+        payload: %{}
+      )
+
+    {:ok, soonest} = Scheduler.soonest(db)
+    assert soonest > 0
+    {:ok, 1} = Scheduler.remove(db, "fast")
   end
 
   # ---------------------------------------------------------------

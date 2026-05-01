@@ -4,8 +4,8 @@ defmodule Honker.MixProject do
   def project do
     [
       app: :honker,
-      version: "0.1.0",
-      elixir: "~> 1.15",
+      version: "0.1.1",
+      elixir: "~> 1.17",
       description:
         "Durable queues, streams, pub/sub, and scheduler on SQLite. " <>
           "Thin wrapper around the Honker loadable extension.",

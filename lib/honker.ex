@@ -45,6 +45,8 @@ defmodule Honker do
     defstruct [:conn, queue_opts: %{}]
   end
 
+  @update_table :honker_local_update_seq
+
   # Honker.Job lives in lib/honker/job.ex — its struct + lifecycle
   # helpers are co-located so callers can `alias Honker.Job; Job.ack`
   # without pulling the Database+Queue modules into scope.
@@ -185,6 +187,29 @@ defmodule Honker do
   end
 
   @doc false
+  def mark_updated(conn) do
+    ensure_update_table()
+
+    try do
+      :ets.update_counter(@update_table, conn, {2, 1}, {conn, 0})
+      :ok
+    rescue
+      ArgumentError ->
+        :ok
+    end
+  end
+
+  @doc false
+  def update_snapshot(conn) do
+    ensure_update_table()
+
+    case :ets.lookup(@update_table, conn) do
+      [{^conn, n}] -> n
+      _ -> 0
+    end
+  end
+
+  @doc false
   def query_first(conn, sql, params) do
     with {:ok, stmt} <- Sqlite3.prepare(conn, sql),
          :ok <- Sqlite3.bind(stmt, params),
@@ -211,6 +236,20 @@ defmodule Honker do
         :done -> :ok
         err -> err
       end
+    end
+  end
+
+  defp ensure_update_table do
+    case :ets.whereis(@update_table) do
+      :undefined ->
+        try do
+          :ets.new(@update_table, [:named_table, :public, :set, read_concurrency: true])
+        rescue
+          ArgumentError -> @update_table
+        end
+
+      _ ->
+        @update_table
     end
   end
 end

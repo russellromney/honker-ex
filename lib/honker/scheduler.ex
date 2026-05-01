@@ -1,13 +1,13 @@
 defmodule Honker.Scheduler do
   @moduledoc """
-  Cron-scheduled task registry. Thin wrapper over `honker_scheduler_*`
+  Time-trigger task registry. Thin wrapper over `honker_scheduler_*`
   SQL functions, plus a blocking `run/3` loop with leader election via
   the `honker-scheduler` advisory lock.
 
       :ok = Honker.Scheduler.add(db,
         name: "hourly-health",
         queue: "health",
-        cron: "0 * * * *",
+        schedule: "0 * * * *",
         payload: %{}
       )
 
@@ -23,17 +23,19 @@ defmodule Honker.Scheduler do
   @lock_name "honker-scheduler"
   @lock_ttl_s 60
   @heartbeat_ms 20_000
-  @tick_interval_ms 1_000
   @standby_poll_ms 5_000
+  @update_poll_ms 50
 
   @doc """
-  Register a cron task. Idempotent by `:name`.
+  Register a recurring scheduled task. Idempotent by `:name`.
 
   Options (all required except `:priority` and `:expires_s`):
 
     * `:name`       — unique task name
     * `:queue`      — queue the payload is enqueued onto each fire
-    * `:cron`       — standard 5-field cron expression
+    * `:schedule`   — canonical schedule expression:
+                      5-field cron, 6-field cron, or `@every <n><unit>`
+    * `:cron`       — backward-compatible alias for `:schedule`
     * `:payload`    — any JSON-encodable term
     * `:priority`   — integer (default 0)
     * `:expires_s`  — seconds; the fired job expires this many seconds
@@ -42,7 +44,8 @@ defmodule Honker.Scheduler do
   def add(%Database{conn: conn}, opts) do
     name = Keyword.fetch!(opts, :name)
     queue = Keyword.fetch!(opts, :queue)
-    cron = Keyword.fetch!(opts, :cron)
+    schedule = Keyword.get(opts, :schedule) || Keyword.get(opts, :cron)
+    if is_nil(schedule), do: raise(ArgumentError, "missing required option :schedule")
     payload = Keyword.fetch!(opts, :payload)
     priority = Keyword.get(opts, :priority, 0)
     expires_s = Keyword.get(opts, :expires_s)
@@ -52,10 +55,16 @@ defmodule Honker.Scheduler do
     case Honker.query_first(
            conn,
            "SELECT honker_scheduler_register(?1, ?2, ?3, ?4, ?5, ?6)",
-           [name, queue, cron, payload_json, priority, expires_s]
+           [name, queue, schedule, payload_json, priority, expires_s]
          ) do
-      {:ok, [_]} -> :ok
-      {:ok, nil} -> :ok
+      {:ok, [_]} ->
+        Honker.mark_updated(conn)
+        :ok
+
+      {:ok, nil} ->
+        Honker.mark_updated(conn)
+        :ok
+
       other -> other
     end
   end
@@ -67,7 +76,10 @@ defmodule Honker.Scheduler do
            "SELECT honker_scheduler_unregister(?1)",
            [name]
          ) do
-      {:ok, [count]} -> {:ok, count}
+      {:ok, [count]} ->
+        Honker.mark_updated(conn)
+        {:ok, count}
+
       other -> other
     end
   end
@@ -120,7 +132,7 @@ defmodule Honker.Scheduler do
       true ->
         case Lock.try_acquire(db, @lock_name, owner, @lock_ttl_s) do
           {:ok, nil} ->
-            sleep_with_stop(@standby_poll_ms, stop_fun)
+            wait_update_or_timeout(db, @standby_poll_ms, stop_fun)
             run(db, owner, stop_fun)
 
           {:ok, %Lock{} = lock} ->
@@ -161,7 +173,8 @@ defmodule Honker.Scheduler do
 
             case maybe_heartbeat(db, lock, last_heartbeat_ms, now_ms) do
               {:ok, :kept, new_last_ms} ->
-                sleep_with_stop(@tick_interval_ms, stop_fun)
+                wait_ms = next_wait_ms(db, now_ms, new_last_ms)
+                wait_update_or_timeout(db, wait_ms, stop_fun)
                 leader_loop(db, lock, stop_fun, new_last_ms)
 
               {:ok, :lost} ->
@@ -189,18 +202,58 @@ defmodule Honker.Scheduler do
     end
   end
 
-  # Sleep in small slices so we can observe stop_fun promptly without
-  # hammering it.
-  defp sleep_with_stop(ms, _stop_fun) when ms <= 0, do: :ok
+  defp next_wait_ms(db, now_ms, last_heartbeat_ms) do
+    heartbeat_wait = max(0, @heartbeat_ms - (now_ms - last_heartbeat_ms))
 
-  defp sleep_with_stop(ms, stop_fun) do
-    slice = min(ms, 200)
-    Process.sleep(slice)
+    case soonest(db) do
+      {:ok, ts} when is_integer(ts) and ts > 0 ->
+        fire_wait = max(0, ts * 1000 - System.system_time(:millisecond))
+        min(heartbeat_wait, fire_wait)
+
+      _ ->
+        heartbeat_wait
+    end
+  end
+
+  defp data_version(%Database{conn: conn}) do
+    case Honker.query_first(conn, "PRAGMA data_version", []) do
+      {:ok, [n]} when is_integer(n) -> n
+      {:ok, [n]} -> n
+      _ -> 0
+    end
+  end
+
+  defp wait_update_or_timeout(_db, ms, _stop_fun) when ms <= 0, do: :ok
+
+  defp wait_update_or_timeout(db, ms, stop_fun) do
+    deadline = System.monotonic_time(:millisecond) + ms
+    last_version = data_version(db)
+    last_local = Honker.update_snapshot(db.conn)
+    do_wait_update_or_timeout(db, deadline, last_version, last_local, stop_fun)
+  end
+
+  defp do_wait_update_or_timeout(db, deadline, last_version, last_local, stop_fun) do
+    now = System.monotonic_time(:millisecond)
 
     cond do
-      stop_fun.() -> :ok
-      slice >= ms -> :ok
-      true -> sleep_with_stop(ms - slice, stop_fun)
+      stop_fun.() ->
+        :ok
+
+      now >= deadline ->
+        :ok
+
+      true ->
+        slice = min(@update_poll_ms, deadline - now)
+        Process.sleep(slice)
+
+        version = data_version(db)
+        local = Honker.update_snapshot(db.conn)
+
+        cond do
+          version != last_version -> :ok
+          local != last_local -> :ok
+          true -> do_wait_update_or_timeout(db, deadline, last_version, last_local, stop_fun)
+        end
     end
   end
 end

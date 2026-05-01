@@ -190,7 +190,7 @@ defmodule HonkerParityTest do
       Scheduler.add(db,
         name: "hourly",
         queue: "health",
-        cron: "0 * * * *",
+        schedule: "0 * * * *",
         payload: %{}
       )
 
@@ -210,7 +210,7 @@ defmodule HonkerParityTest do
       Scheduler.add(db,
         name: "every-minute",
         queue: "h",
-        cron: "* * * * *",
+        schedule: "* * * * *",
         payload: %{}
       )
 
@@ -261,6 +261,100 @@ defmodule HonkerParityTest do
     assert n == 0
   end
 
+  test "Scheduler accepts legacy cron alias", %{db: db} do
+    :ok =
+      Scheduler.add(db,
+        name: "legacy",
+        queue: "health",
+        cron: "@every 1s",
+        payload: %{}
+      )
+
+    {:ok, soonest} = Scheduler.soonest(db)
+    assert soonest > 0
+    {:ok, 1} = Scheduler.remove(db, "legacy")
+  end
+
+  test "Scheduler accepts every-second schedule", %{db: db} do
+    :ok =
+      Scheduler.add(db,
+        name: "fast",
+        queue: "health",
+        schedule: "@every 1s",
+        payload: %{}
+      )
+
+    {:ok, soonest} = Scheduler.soonest(db)
+    assert soonest > 0
+    {:ok, 1} = Scheduler.remove(db, "fast")
+  end
+
+  test "Scheduler.run fires every-second schedule", %{db: db} do
+    :ok =
+      Scheduler.add(db,
+        name: "fast-run",
+        queue: "fast-run",
+        schedule: "@every 1s",
+        payload: %{ok: true}
+      )
+
+    stop = :atomics.new(1, signed: false)
+    :atomics.put(stop, 1, 0)
+
+    task =
+      Task.async(fn ->
+        Scheduler.run(db, "parity-fast", fn ->
+          :atomics.get(stop, 1) == 1
+        end)
+      end)
+
+    job =
+      wait_for_job(fn ->
+        Queue.claim_one(db, "fast-run", "worker-fast")
+      end)
+
+    assert %Job{} = job
+    assert job.payload == %{"ok" => true}
+    assert {:ok, true} = Job.ack(db, job)
+
+    :atomics.put(stop, 1, 1)
+    assert :ok = Task.await(task, 5_000)
+  end
+
+  test "Scheduler.run wakes when a new schedule is registered", %{db: db} do
+    stop = :atomics.new(1, signed: false)
+    :atomics.put(stop, 1, 0)
+
+    task =
+      Task.async(fn ->
+        Scheduler.run(db, "parity-wake", fn ->
+          :atomics.get(stop, 1) == 1
+        end)
+      end)
+
+    Process.sleep(200)
+
+    :ok =
+      Scheduler.add(db,
+        name: "wake-fast",
+        queue: "wake-fast",
+        schedule: "@every 1s",
+        payload: %{wake: true}
+      )
+
+    job =
+      wait_for_job(fn ->
+        Queue.claim_one(db, "wake-fast", "worker-wake")
+      end)
+
+    assert %Job{} = job
+    assert job.payload == %{"wake" => true}
+    assert {:ok, true} = Job.ack(db, job)
+
+    :atomics.put(stop, 1, 1)
+    assert :ok = Task.await(task, 5_000)
+  end
+
   # ---------------------------------------------------------------
   # Locks
   # ---------------------------------------------------------------
@@ -277,6 +371,29 @@ defmodule HonkerParityTest do
     # Bob can now grab it.
     {:ok, %Lock{} = b} = Lock.try_acquire(db, "gate", "bob", 60)
     assert {:ok, true} = Lock.release(b, db)
+  end
+
+  defp wait_for_job(fun, timeout_ms \\ 3_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_job(fun, deadline)
+  end
+
+  defp do_wait_for_job(fun, deadline) do
+    case fun.() do
+      {:ok, %Job{} = job} ->
+        job
+
+      {:ok, nil} ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("expected job before timeout")
+        else
+          Process.sleep(50)
+          do_wait_for_job(fun, deadline)
+        end
+
+      other ->
+        flunk("unexpected result while waiting for job: #{inspect(other)}")
+    end
   end
 
   test "Lock heartbeat extends TTL", %{db: db} do

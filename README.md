@@ -1,6 +1,11 @@
 # honker (Elixir)
 
-Elixir binding for [Honker](https://honker.dev) — durable queues, streams, pub/sub, and scheduler on SQLite.
+Elixir binding for [Honker](https://github.com/russellromney/honker): durable queues, streams, pub/sub, and time-trigger scheduling on SQLite.
+
+Full docs:
+
+- [Main repo](https://github.com/russellromney/honker)
+- [Docs](https://honker.dev)
 
 ## Install
 
@@ -12,18 +17,7 @@ def deps do
 end
 ```
 
-You'll also need the Honker SQLite extension. Prebuilds at [GitHub releases](https://github.com/russellromney/honker/releases/latest), or build from source:
-
-```bash
-git clone https://github.com/russellromney/honker
-cd honker
-cargo build --release -p honker-extension
-# → target/release/libhonker_ext.{dylib,so}
-```
-
-## Why this matters for Elixir
-
-SQLite-backed task queues compete directly with [Oban](https://github.com/sorentwo/oban) (Postgres-based). For single-node Phoenix / Nerves / LiveView apps that don't already run Postgres, Honker removes the whole "provision and operate a second database" step.
+You also need the Honker SQLite extension from the main repo.
 
 ## Quick start
 
@@ -40,58 +34,22 @@ case Honker.Queue.claim_one(db, "emails", "worker-1") do
 end
 ```
 
-## API
+Delayed jobs use `run_at:`:
 
-### `Honker.open(path, extension_path: ...)` → `{:ok, %Honker.Database{}}`
-
-Opens or creates a SQLite DB, loads the Honker loadable extension, applies default PRAGMAs, and bootstraps the schema.
-
-### `Honker.configure_queue(db, queue_name, opts)` → `%Honker.Database{}`
-
-Register per-queue options: `visibility_timeout_s` (default 300), `max_attempts` (default 3).
-
-### `Honker.Queue.enqueue(db, queue, payload, opts)` → `{:ok, id}`
-
-Insert a job. `payload` is any term — encoded via `Jason`. `opts` supports `:delay`, `:run_at`, `:priority`, `:expires`.
-
-### `Honker.Queue.claim_batch(db, queue, worker_id, n)` / `Honker.Queue.claim_one(db, queue, worker_id)`
-
-Atomic claim. Returns `{:ok, [%Job{}]}` or `{:ok, nil}`.
-
-### `Honker.Job.ack(db, job)` / `retry(db, job, delay_s, error)` / `fail(db, job, error)` / `heartbeat(db, job, extend_s)`
-
-Claim lifecycle. Each returns `{:ok, bool}` — true iff the claim was still valid.
-
-### `Honker.notify(db, channel, payload)` → `{:ok, id}`
-
-Fire a `pg_notify`-style pub/sub signal.
-
-## What's not here yet
-
-- `GenServer`-backed worker / Supervisor tree (you can build this in ~50 lines with the claim + ack primitives)
-- `listen` / update-wake async API
-
-The design intent: keep the binding *tiny*, let the Elixir / Phoenix side build whatever Supervisor/GenServer shape fits the app.
-
-### `Honker.Scheduler`
-
-Recurring time-trigger wrapper over `honker_scheduler_*`.
-
-Use `schedule:` as the canonical recurring expression key:
-
-- 5-field cron
-- 6-field cron
-- `@every <n><unit>`
-
-`cron:` still works as a backward-compatible alias.
-
-## Testing
-
-```bash
-# Build the extension first
-cd /path/to/honker && cargo build --release -p honker-extension
-
-cd packages/honker-ex
-mix deps.get
-mix test
+```elixir
+{:ok, _id} = Honker.Queue.enqueue(db, "emails", %{to: "later@example.com"}, run_at: System.os_time(:second) + 10)
 ```
+
+Recurring schedules use `schedule:`:
+
+```elixir
+:ok = Honker.Scheduler.add(db, name: "fast", queue: "emails", schedule: "@every 1s", payload: %{kind: "tick"})
+```
+
+Supported schedule forms:
+
+- `0 3 * * *`
+- `*/2 * * * * *`
+- `@every 1s`
+
+`schedule:` is the canonical recurring name. `cron:` is compatibility-only.

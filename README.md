@@ -1,55 +1,20 @@
-# honker (Elixir)
+# honker-ex
 
-Elixir binding for [Honker](https://github.com/russellromney/honker): durable queues, streams, pub/sub, and time-trigger scheduling on SQLite.
+This repository is archived.
 
-Full docs:
+Honker's maintained bindings now live in the main Honker repo:
+https://github.com/russellromney/honker/tree/main/packages/honker-ex
 
-- [Main repo](https://github.com/russellromney/honker)
-- [Docs](https://honker.dev)
+Use that path for source, issues, pull requests, examples, and release work.
 
-## Install
+Main repo:
 
-```elixir
-def deps do
-  [
-    {:honker, "~> 0.1"}
-  ]
-end
-```
+https://github.com/russellromney/honker
 
-You also need the Honker SQLite extension from the main repo.
+Docs:
 
-## Quick start
+https://honker.dev
 
-```elixir
-{:ok, db} = Honker.open("app.db", extension_path: "./libhonker_ext.dylib")
+The Elixir package source now lives in the main repo.
 
-{:ok, _id} = Honker.Queue.enqueue(db, "emails", %{to: "alice@example.com"})
-
-case Honker.Queue.claim_one(db, "emails", "worker-1") do
-  {:ok, nil} -> :empty
-  {:ok, job} ->
-    send_email(job.payload)
-    Honker.Job.ack(db, job)
-end
-```
-
-Delayed jobs use `run_at:`:
-
-```elixir
-{:ok, _id} = Honker.Queue.enqueue(db, "emails", %{to: "later@example.com"}, run_at: System.os_time(:second) + 10)
-```
-
-Recurring schedules use `schedule:`:
-
-```elixir
-:ok = Honker.Scheduler.add(db, name: "fast", queue: "emails", schedule: "@every 1s", payload: %{kind: "tick"})
-```
-
-Supported schedule forms:
-
-- `0 3 * * *`
-- `*/2 * * * * *`
-- `@every 1s`
-
-`schedule:` is the canonical recurring name. `cron:` is compatibility-only.
+This repo stays online as a signpost for old links.
